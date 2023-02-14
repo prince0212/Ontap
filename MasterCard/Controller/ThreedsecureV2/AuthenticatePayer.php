@@ -1,0 +1,115 @@
+<?php
+
+declare(strict_types=1);
+
+namespace OnTap\MasterCard\Controller\ThreedsecureV2;
+
+use Exception;
+use Magento\Checkout\Model\Session;
+use Magento\Framework\App\Action\Action;
+use Magento\Framework\App\Action\Context;
+use Magento\Framework\App\Action\HttpPostActionInterface;
+use Magento\Framework\App\ResponseInterface;
+use Magento\Framework\Controller\Result\JsonFactory;
+use Magento\Framework\Controller\ResultInterface;
+use Magento\Payment\Gateway\Command\CommandPool;
+use Magento\Payment\Gateway\Data\PaymentDataObjectFactory;
+use Psr\Log\LoggerInterface;
+
+class AuthenticatePayer extends Action implements HttpPostActionInterface
+{
+    const COMMAND_NAME = 'authenticate_payer';
+
+    /**
+     * @var PaymentDataObjectFactory
+     */
+    private $paymentDataObjectFactory;
+
+    /**
+     * @var JsonFactory
+     */
+    private $jsonFactory;
+
+    /**
+     * @var CommandPool
+     */
+    private $commandPool;
+
+    /**
+     * @var Session
+     */
+    private $checkoutSession;
+
+    /**
+     * @var LoggerInterface
+     */
+    private $logger;
+
+    /**
+     * Check constructor.
+     * @param PaymentDataObjectFactory $paymentDataObjectFactory
+     * @param JsonFactory $jsonFactory
+     * @param CommandPool $commandPool
+     * @param Context $context
+     * @param Session $checkoutSession
+     * @param LoggerInterface $logger
+     */
+    public function __construct(
+        PaymentDataObjectFactory $paymentDataObjectFactory,
+        JsonFactory $jsonFactory,
+        CommandPool $commandPool,
+        Context $context,
+        Session $checkoutSession,
+        LoggerInterface $logger
+    ) {
+        parent::__construct($context);
+        $this->paymentDataObjectFactory = $paymentDataObjectFactory;
+        $this->jsonFactory = $jsonFactory;
+        $this->commandPool = $commandPool;
+        $this->checkoutSession = $checkoutSession;
+        $this->logger = $logger;
+    }
+
+    /**
+     * Dispatch request
+     *
+     * @return ResultInterface|ResponseInterface
+     */
+    public function execute()
+    {
+        $jsonResult = $this->jsonFactory->create();
+
+        try {
+            $quote = $this->checkoutSession->getQuote();
+            $payment = $quote->getPayment();
+            $paymentDataObject = $this->paymentDataObjectFactory->create($payment);
+
+            $this->commandPool
+                ->get(self::COMMAND_NAME)
+                ->execute([
+                    'payment' => $paymentDataObject,
+                    'amount' => $quote->getBaseGrandTotal(),
+                    'remote_ip' => $quote->getRemoteIp(),
+                    'browserDetails' => $this->getRequest()->getParam('browserDetails')
+                ]);
+
+            $payment->save();
+
+            $jsonResult->setData([
+                'html' => $payment->getAdditionalInformation('auth_redirect_html'),
+                'action' => $payment->getAdditionalInformation('auth_payment_interaction') === 'REQUIRED'
+                    ? 'challenge'
+                    : 'frictionless'
+            ]);
+        } catch (Exception $e) {
+            $this->logger->error((string)$e);
+            $jsonResult
+                ->setHttpResponseCode(400)
+                ->setData([
+                    'message' => __('An error occurred while processing your transaction')
+                ]);
+        }
+
+        return $jsonResult;
+    }
+}
